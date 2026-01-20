@@ -64,21 +64,30 @@ module.exports = function (io) {
   // Cleanup old ended games to prevent DB from filling up
   async function cleanupOldEndedGames() {
     try {
-      // Keep only last KEEP_ENDED_GAMES ended games
-      const sql = `
-        DELETE FROM slide_rounds
-        WHERE status = ?
-          AND created_at < (
-            SELECT cutoff FROM (
-              SELECT created_at AS cutoff
-              FROM slide_rounds
-              WHERE status = ?
-              ORDER BY created_at DESC
-              LIMIT 1 OFFSET ?
-            ) t
-          )
-      `;
-      await query(sql, [STATUS.WAITTING, STATUS.WAITTING, KEEP_ENDED_GAMES]);
+      // Keep only last KEEP_ENDED_GAMES ended games.
+      // MySQL does not allow parameter placeholders for LIMIT/OFFSET.
+      const offset = Math.max(0, Number(KEEP_ENDED_GAMES) - 1);
+      if (!Number.isFinite(offset)) return;
+
+      const cutoffRows = await query(
+        `SELECT created_at
+         FROM slide_rounds
+         WHERE status = ?
+         ORDER BY created_at DESC
+         LIMIT 1 OFFSET ${offset}`,
+        [STATUS.WAITTING]
+      );
+
+      if (!cutoffRows || cutoffRows.length === 0) return;
+      const cutoff = cutoffRows[0].created_at;
+      if (!cutoff) return;
+
+      await query(
+        `DELETE FROM slide_rounds
+         WHERE status = ?
+           AND created_at < ?`,
+        [STATUS.WAITTING, cutoff]
+      );
     } catch (err) {
       // Non-fatal
       console.warn('[SLIDE] cleanupOldEndedGames warning:', err?.message || err);
