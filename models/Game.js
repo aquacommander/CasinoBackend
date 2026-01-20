@@ -1,6 +1,45 @@
 const { query } = require('../database/connection');
 
 /**
+ * Safely parse JSON columns that may come back as:
+ * - null/undefined
+ * - string (valid JSON, invalid JSON, empty)
+ * - object/array (already parsed by mysql2)
+ * - Buffer
+ */
+function safeJson(value, fallback) {
+  if (value === null || value === undefined) return fallback;
+
+  // mysql2 can return JSON columns as Buffer sometimes
+  if (Buffer.isBuffer(value)) {
+    const s = value.toString('utf8').trim();
+    if (!s) return fallback;
+    try {
+      return JSON.parse(s);
+    } catch (e) {
+      console.warn('⚠️ Invalid JSON (Buffer) in DB column, using fallback:', s.slice(0, 120));
+      return fallback;
+    }
+  }
+
+  // Some setups return JSON columns already parsed
+  if (typeof value === 'object') return value;
+
+  // If it's not a string, just return fallback
+  if (typeof value !== 'string') return fallback;
+
+  const s = value.trim();
+  if (!s) return fallback;
+
+  try {
+    return JSON.parse(s);
+  } catch (e) {
+    console.warn('⚠️ Invalid JSON (string) in DB column, using fallback:', s.slice(0, 120));
+    return fallback;
+  }
+}
+
+/**
  * Crash Game Model (MySQL)
  */
 const CrashGame = {
@@ -37,14 +76,14 @@ const CrashGame = {
       publicSeed: game.public_seed,
       privateSeed: game.private_seed,
       privateHash: game.private_hash,
-      players: game.players ? JSON.parse(game.players) : [],
-      history: game.history ? JSON.parse(game.history) : [],
+      players: safeJson(game.players, []),
+      history: safeJson(game.history, []),
       createdAt: game.created_at,
       startedAt: game.started_at,
       endedAt: game.ended_at,
-      save: async function() {
+      save: async function () {
         return await CrashGame.findByIdAndUpdate(this._id, this);
-      }
+      },
     };
   },
 
@@ -52,7 +91,7 @@ const CrashGame = {
     const sql = `INSERT INTO crash_games 
       (id, status, crash_point, public_seed, private_seed, private_hash, players, history, started_at, ended_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    
+
     const params = [
       data._id,
       data.status || 1,
@@ -63,7 +102,7 @@ const CrashGame = {
       JSON.stringify(data.players || []),
       JSON.stringify(data.history || []),
       data.startedAt || null,
-      data.endedAt || null
+      data.endedAt || null,
     ];
 
     await query(sql, params);
@@ -105,7 +144,7 @@ const CrashGame = {
     const sql = `UPDATE crash_games SET ${setParts.join(', ')} WHERE id = ?`;
     await query(sql, params);
     return await CrashGame.findOne({ _id: id });
-  }
+  },
 };
 
 /**
@@ -137,14 +176,14 @@ const SlideGame = {
       _id: game.id,
       status: game.status,
       crashPoint: parseFloat(game.crash_point),
-      numbers: game.numbers ? JSON.parse(game.numbers) : [],
+      numbers: safeJson(game.numbers, []),
       publicSeed: game.public_seed,
       privateHash: game.private_hash,
-      players: game.players ? JSON.parse(game.players) : [],
+      players: safeJson(game.players, []),
       createdAt: game.created_at,
-      save: async function() {
+      save: async function () {
         return await SlideGame.findByIdAndUpdate(this._id, this);
-      }
+      },
     };
   },
 
@@ -152,7 +191,7 @@ const SlideGame = {
     const sql = `INSERT INTO slide_games 
       (id, status, crash_point, numbers, public_seed, private_hash, players)
       VALUES (?, ?, ?, ?, ?, ?, ?)`;
-    
+
     const params = [
       data._id,
       data.status || 0,
@@ -160,7 +199,7 @@ const SlideGame = {
       JSON.stringify(data.numbers || []),
       data.publicSeed || null,
       data.privateHash || null,
-      JSON.stringify(data.players || [])
+      JSON.stringify(data.players || []),
     ];
 
     await query(sql, params);
@@ -205,27 +244,27 @@ const SlideGame = {
     let sql = `SELECT ${selectFields} FROM slide_games WHERE 1=1`;
     const params = [];
 
-    if (filters.status) {
+    if (filters.status !== undefined) {
       sql += ' AND status = ?';
       params.push(filters.status);
     }
 
     sql += ' ORDER BY created_at DESC';
-    
+
     if (filters.limit) {
       sql += ' LIMIT ?';
       params.push(filters.limit);
     }
 
     const results = await query(sql, params);
-    return results.map(game => ({
+    return results.map((game) => ({
       _id: game.id,
       id: game.id,
       crashPoint: game.crash_point ? parseFloat(game.crash_point) : null,
       crash_point: game.crash_point,
-      createdAt: game.created_at
+      createdAt: game.created_at,
     }));
-  }
+  },
 };
 
 /**
@@ -251,7 +290,7 @@ const MineGame = {
       params.push(filters.status);
     }
 
-    // Handle MongoDB-style $gt operator
+    // Handle MongoDB-style $gt/$lt operators
     if (filters.expiresAt) {
       if (filters.expiresAt.$gt) {
         sql += ' AND expires_at > ?';
@@ -277,7 +316,7 @@ const MineGame = {
       status: game.status,
       mines: game.mines,
       amount: game.amount,
-      datas: game.datas ? JSON.parse(game.datas) : [],
+      datas: safeJson(game.datas, []),
       txId: game.tx_id || null,
       createdAt: game.created_at,
       expiresAt: game.expires_at,
@@ -289,9 +328,9 @@ const MineGame = {
       revealedGems: game.revealed_gems || null,
       houseEdge: game.house_edge ? parseFloat(game.house_edge) : null,
       payoutError: game.payout_error || null,
-      save: async function() {
+      save: async function () {
         return await MineGame.findByIdAndUpdate(this.id, this);
-      }
+      },
     };
   },
 
@@ -303,10 +342,12 @@ const MineGame = {
     const amount = Number.parseInt(String(data.amount ?? '0'), 10);
     const datasJson = JSON.stringify(data.datas || []);
     const txId = data.txId ? String(data.txId) : null;
-    // Let mysql2 handle Date objects directly (no manual conversion needed)
-    const expiresAt = data.expiresAt instanceof Date
-      ? data.expiresAt
-      : data.expiresAt
+
+    // Let mysql2 handle Date objects directly
+    const expiresAt =
+      data.expiresAt instanceof Date
+        ? data.expiresAt
+        : data.expiresAt
         ? new Date(data.expiresAt)
         : null;
 
@@ -324,16 +365,8 @@ const MineGame = {
     const sql = `INSERT INTO mine_games 
       (public_key, status, mines, amount, datas, tx_id, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)`;
-    
-    const params = [
-      publicKey,
-      status,
-      mines,
-      amount,
-      datasJson,
-      txId,
-      expiresAt
-    ];
+
+    const params = [publicKey, status, mines, amount, datasJson, txId, expiresAt];
 
     // Validate no undefined or NaN in params
     if (params.some((v) => v === undefined || (typeof v === 'number' && Number.isNaN(v)))) {
@@ -343,24 +376,25 @@ const MineGame = {
 
     // Log for debugging
     console.log('MineGame.create SQL:', sql);
-    console.log('MineGame.create PARAMS:', params.map((v) => [typeof v, v]));
+    console.log(
+      'MineGame.create PARAMS:',
+      params.map((v) => [typeof v, v])
+    );
     console.log('MineGame.create placeholders:', (sql.match(/\?/g) ?? []).length, 'values:', params.length);
 
     const result = await query(sql, params);
-    
-    // Get the inserted ID from the result (OkPacket from mysql2)
+
     const insertId = result.insertId;
     if (!insertId) {
       throw new Error('Failed to get insert ID from database');
     }
-    
-    // Query the created game directly by ID
+
     const findSql = 'SELECT * FROM mine_games WHERE id = ? LIMIT 1';
     const findResults = await query(findSql, [insertId]);
     if (findResults.length === 0) {
       throw new Error('Failed to retrieve created game');
     }
-    
+
     const game = findResults[0];
     return {
       id: game.id,
@@ -368,13 +402,13 @@ const MineGame = {
       status: game.status,
       mines: game.mines,
       amount: game.amount,
-      datas: game.datas ? (typeof game.datas === 'string' ? JSON.parse(game.datas) : game.datas) : [],
+      datas: safeJson(game.datas, []),
       txId: game.tx_id || null,
       createdAt: game.created_at,
       expiresAt: game.expires_at,
-      save: async function() {
+      save: async function () {
         return await MineGame.findByIdAndUpdate(this.id, this);
-      }
+      },
     };
   },
 
@@ -390,6 +424,7 @@ const MineGame = {
       setParts.push('datas = ?');
       params.push(JSON.stringify(updates.datas));
     }
+
     // Payout fields
     if (updates.payoutAmount !== undefined) {
       setParts.push('payout_amount = ?');
@@ -436,8 +471,7 @@ const MineGame = {
         AND expires_at IS NOT NULL
         AND expires_at < NOW()
     `;
-    const result = await query(sql, [String(publicKey)]);
-    return result; // ResultSetHeader (affectedRows etc.)
+    return await query(sql, [String(publicKey)]);
   },
 
   async deleteMany(filters) {
@@ -460,7 +494,7 @@ const MineGame = {
     }
 
     await query(sql, params);
-  }
+  },
 };
 
 /**
@@ -488,14 +522,15 @@ const VideoPokerGame = {
       publicSeed: game.public_seed,
       privateSeed: game.private_seed,
       privateSeedHash: game.private_seed_hash,
-      hand: game.hand ? JSON.parse(game.hand) : [],
+      hand: safeJson(game.hand, []),
+      holdIndexes: safeJson(game.hold_indexes, null),
       betAmount: game.bet_amount,
       result: game.result,
       payout: game.payout,
       createdAt: game.created_at,
-      save: async function() {
+      save: async function () {
         return await VideoPokerGame.findByIdAndUpdate(this.id, this);
-      }
+      },
     };
   },
 
@@ -503,7 +538,7 @@ const VideoPokerGame = {
     const sql = `INSERT INTO video_poker_games 
       (public_key, public_seed, private_seed, private_seed_hash, hand, bet_amount, result, payout)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
-    
+
     const params = [
       data.publicKey,
       data.publicSeed || null,
@@ -512,7 +547,7 @@ const VideoPokerGame = {
       JSON.stringify(data.hand || []),
       data.betAmount || 0,
       data.result || '',
-      data.payout || 0
+      data.payout || 0,
     ];
 
     const result = await query(sql, params);
@@ -542,12 +577,12 @@ const VideoPokerGame = {
     const sql = `UPDATE video_poker_games SET ${setParts.join(', ')} WHERE id = ?`;
     await query(sql, params);
     return await VideoPokerGame.findOne({ id });
-  }
+  },
 };
 
 module.exports = {
   CrashGame,
   SlideGame,
   MineGame,
-  VideoPokerGame
+  VideoPokerGame,
 };
