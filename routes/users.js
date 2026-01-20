@@ -14,7 +14,7 @@ router.get("/exists/:walletId", async (req, res) => {
       return res.status(400).json({ error: "Invalid walletId (must be 60 A-Z characters)" });
     }
 
-    const rows = await query("SELECT id FROM users WHERE wallet_id = ? LIMIT 1", [walletId]);
+    const rows = await query("SELECT public_key FROM wallets WHERE public_key = ? LIMIT 1", [walletId]);
     return res.json({ exists: rows.length > 0 });
   } catch (e) {
     console.error("Error checking user existence:", e);
@@ -36,12 +36,12 @@ router.post("/register", async (req, res) => {
 
     // Create user if not exists; update last_login_at if exists
     await query(
-      "INSERT INTO users (wallet_id) VALUES (?) ON DUPLICATE KEY UPDATE last_login_at = NOW()",
+      "INSERT INTO wallets (public_key) VALUES (?) ON DUPLICATE KEY UPDATE last_login_at = NOW()",
       [walletId]
     );
 
     const rows = await query(
-      "SELECT id, wallet_id, status, created_at, last_login_at FROM users WHERE wallet_id = ? LIMIT 1",
+      "SELECT public_key, status, created_at, last_login_at FROM wallets WHERE public_key = ? LIMIT 1",
       [walletId]
     );
 

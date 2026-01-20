@@ -7,56 +7,47 @@ loadEnv();
 async function main() {
   const dbName = getDbName();
 
-  // 1) Check current column length in the actual DB
-  const rows = await query(
-    `
-    SELECT CHARACTER_MAXIMUM_LENGTH AS maxLen
-    FROM information_schema.columns
-    WHERE table_schema = ?
-      AND table_name = 'mine_games'
-      AND column_name = 'public_key'
-    `,
-    [dbName]
-  );
+  const targets = [
+    { table: 'wallets', column: 'public_key' },
+    { table: 'mine_sessions', column: 'wallet_public_key' },
+    { table: 'video_poker_sessions', column: 'wallet_public_key' },
+    { table: 'bets', column: 'wallet_public_key' },
+  ];
 
-  const maxLen = rows?.[0]?.maxLen ?? null;
-  console.log("[migrate] mine_games.public_key maxLen:", maxLen);
-
-  // 2) Fix schema if too small
-  // Use VARCHAR(80) to be safe. (60 should also work if you're sure it's always 60.)
-  if (!maxLen || Number(maxLen) < 60) {
-    console.log("[migrate] Altering mine_games.public_key to VARCHAR(80)...");
-    await query(
-      `ALTER TABLE mine_games MODIFY public_key VARCHAR(80) NOT NULL`,
-      []
+  for (const target of targets) {
+    const rows = await query(
+      `
+      SELECT CHARACTER_MAXIMUM_LENGTH AS maxLen
+      FROM information_schema.columns
+      WHERE table_schema = ?
+        AND table_name = ?
+        AND column_name = ?
+      `,
+      [dbName, target.table, target.column]
     );
-    console.log("[migrate] ✅ ALTER complete.");
-  } else {
-    console.log("[migrate] ✅ No ALTER needed.");
+
+    const maxLen = rows?.[0]?.maxLen ?? null;
+    console.log(`[migrate] ${target.table}.${target.column} maxLen:`, maxLen);
+
+    if (!maxLen || Number(maxLen) < 60) {
+      console.log(`[migrate] Altering ${target.table}.${target.column} to VARCHAR(80)...`);
+      await query(
+        `ALTER TABLE ${target.table} MODIFY ${target.column} VARCHAR(80) NOT NULL`,
+        []
+      );
+      console.log("[migrate] ✅ ALTER complete.");
+    } else {
+      console.log("[migrate] ✅ No ALTER needed.");
+    }
   }
 
-  // 3) Delete corrupted LIVE games (already truncated, cannot be recovered)
-  // This prevents cashout mismatch for those broken rows.
+  // Mark corrupted LIVE mine sessions as EXPIRED (already truncated, cannot be recovered)
   const delResult = await query(
-    `DELETE FROM mine_games WHERE status='LIVE' AND LENGTH(public_key) < 60`,
+    `UPDATE mine_sessions SET status='EXPIRED' WHERE status='LIVE' AND LENGTH(wallet_public_key) < 60`,
     []
   );
 
-  // mysql2 returns an object for DELETE with affectedRows
-  console.log("[migrate] Deleted corrupted LIVE games:", delResult?.affectedRows ?? delResult);
-
-  // 4) Verify again
-  const verify = await query(
-    `
-    SELECT CHARACTER_MAXIMUM_LENGTH AS maxLen
-    FROM information_schema.columns
-    WHERE table_schema = ?
-      AND table_name = 'mine_games'
-      AND column_name = 'public_key'
-    `,
-    [dbName]
-  );
-  console.log("[migrate] After migrate maxLen:", verify?.[0]?.maxLen ?? null);
+  console.log("[migrate] Marked corrupted LIVE mine sessions:", delResult?.affectedRows ?? delResult);
 
   console.log("[migrate] ✅ Done.");
 }

@@ -66,12 +66,12 @@ module.exports = function (io) {
     try {
       // Keep only last KEEP_ENDED_GAMES ended games
       const sql = `
-        DELETE FROM slide_games
+        DELETE FROM slide_rounds
         WHERE status = ?
           AND created_at < (
             SELECT cutoff FROM (
               SELECT created_at AS cutoff
-              FROM slide_games
+              FROM slide_rounds
               WHERE status = ?
               ORDER BY created_at DESC
               LIMIT 1 OFFSET ?
@@ -106,8 +106,9 @@ module.exports = function (io) {
       _id: crypto.randomBytes(16).toString('hex'),
       status: STATUS.STARTING,
       crashPoint,
-      numbers: numbersPreview, // ✅ capped (or you can set [] if you prefer)
+      numbers: numbersPreview, // ✅ capped (digest only stored in DB)
       publicSeed,
+      privateSeed,
       privateHash,
       players: [],
       createdAt: new Date(),
@@ -268,9 +269,11 @@ module.exports = function (io) {
       try {
         ensureCycle();
 
-        const game = await SlideGame.findOne({
-          status: { $in: [STATUS.STARTING, STATUS.BETTING, STATUS.PLAYING] },
-        });
+        const game =
+          currentGame ||
+          (await SlideGame.findOne({
+            status: { $in: [STATUS.STARTING, STATUS.BETTING, STATUS.PLAYING] },
+          }));
 
         if (game) {
           // Cap numbers array when sending game state

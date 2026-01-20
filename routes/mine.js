@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { MineGame } = require('../models/Game');
+const { query } = require('../database/connection');
 const crypto = require('crypto');
 const { isValidQubicPublicId, normalizeQubicPublicId } = require('../utils/validation');
 const { calculateMinesPayout } = require('../services/minesPayout');
@@ -9,6 +10,22 @@ const { payFromCasinoToUser } = require('../services/qubicPayout');
 console.log("✅ mine routes loaded");
 
 // ---- Mines helpers (for autobet - reuse existing endpoint logic) ----
+
+function sha256Hex(str) {
+  return crypto.createHash('sha256').update(str).digest('hex');
+}
+
+async function recordMineMove(sessionId, cell, hitMine) {
+  try {
+    await query(
+      `INSERT INTO mine_moves (session_id, cell, hit_mine)
+       VALUES (?, ?, ?)`,
+      [Number(sessionId), Number(cell), hitMine ? 1 : 0]
+    );
+  } catch (err) {
+    console.warn('Mine move record failed:', err?.message || err);
+  }
+}
 
 function buildInitialDatas(mines) {
   // Initialize game data (25 slots: 0-24)
@@ -115,6 +132,10 @@ async function createMineGameInternal({ publicId, mines, amount, txId }) {
 
   const { datas, expiresAt } = buildInitialDatas(mines);
 
+  const publicSeed = crypto.randomBytes(32).toString('hex');
+  const privateSeed = crypto.randomBytes(32).toString('hex');
+  const privateSeedHash = sha256Hex(privateSeed);
+
   const gameData = {
     publicKey: String(publicId),
     status: 'LIVE',
@@ -122,7 +143,10 @@ async function createMineGameInternal({ publicId, mines, amount, txId }) {
     amount: Number(amount),
     datas,
     txId: txId ? String(txId) : null,
-    expiresAt
+    expiresAt,
+    publicSeed,
+    privateSeed,
+    privateSeedHash
   };
 
   return await MineGame.create(gameData);
@@ -154,7 +178,9 @@ async function pickMineTileInternal({ publicId, gameId, index }) {
   const result = applyPickToDatas(game.datas, index);
 
   const updateData = { datas: result.datas };
-  if (result.status === 'END') updateData.status = 'END';
+  if (result.status === 'END') updateData.status = 'ENDED';
+
+  await recordMineMove(game.id, index, result.hitMine);
 
   await MineGame.findByIdAndUpdate(game.id, updateData);
 
@@ -176,7 +202,7 @@ async function cashoutMineGameInternal({ publicId, gameId }) {
 
   // IMPORTANT: Your /mine/pick marks END when all safe gems are opened.
   // So cashout must allow LIVE or END (if not already paid).
-  if (game.status !== 'LIVE' && game.status !== 'END') {
+  if (game.status !== 'LIVE' && game.status !== 'ENDED') {
     const err = new Error('Game is not cashout-eligible');
     err.statusCode = 409;
     throw err;
@@ -206,10 +232,8 @@ async function cashoutMineGameInternal({ publicId, gameId }) {
 
   // 1) End game in DB first (prevents double cashout)
   await MineGame.findByIdAndUpdate(game.id, {
-    status: 'END',
+    status: 'ENDED',
     payoutAmount: payout.payoutAmount,
-    multiplier: payout.multiplier,
-    revealedGems,
   });
 
   // 2) Pay user from casino hot wallet
@@ -232,14 +256,13 @@ async function cashoutMineGameInternal({ publicId, gameId }) {
   // 3) Store payout txId + status
   await MineGame.findByIdAndUpdate(game.id, { 
     payoutTxId: payoutTx.txId,
-    payoutStatus: 'PAID',
+    payoutStatus: 'SENT',
     payoutError: null
   });
 
   return {
     status: 'END',
     payoutAmount: payout.payoutAmount,
-    multiplier: payout.multiplier,
     payoutTxId: payoutTx.txId,
     revealedGems
   };
@@ -370,8 +393,12 @@ router.post('/create', async (req, res, next) => {
 
     // Ensure all values are proper types before creating game
     // IMPORTANT: All values must be primitives (string, number, null)
+    const publicSeed = crypto.randomBytes(32).toString('hex');
+    const privateSeed = crypto.randomBytes(32).toString('hex');
+    const privateSeedHash = sha256Hex(privateSeed);
+
     const gameData = {
-      publicKey: String(publicIdNormalized),  // Ensure string (will be stored as public_key in DB)
+      publicKey: String(publicIdNormalized),  // Ensure string (stored as wallet_public_key in DB)
       status: 'LIVE',
       mines: Number(mines),  // Ensure number (already validated as integer)
       amount: Number(amountInt),  // Ensure number (already validated as integer)
@@ -380,7 +407,10 @@ router.post('/create', async (req, res, next) => {
         mine: minePositions.includes(index) ? 'BOMB' : 'GEM'
       })),
       txId: txId ? String(txId) : null,  // Ensure string or null
-      expiresAt: new Date(Date.now() + 5 * 60 * 1000) // 5 minutes - will be converted to string in create()
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 minutes - will be converted to string in create()
+      publicSeed,
+      privateSeed,
+      privateSeedHash
     };
 
     // Log the game data before creating
@@ -398,13 +428,13 @@ router.post('/create', async (req, res, next) => {
 
     // ✅ Safety check: Verify publicKey was stored correctly (prevents truncation issues)
     if (!game.publicKey || game.publicKey.length !== 60) {
-      console.error("❌ public_key stored incorrectly:", { 
+      console.error("❌ wallet_public_key stored incorrectly:", { 
         publicKey: game.publicKey, 
         length: game.publicKey?.length 
       });
       return res.status(500).json({ 
         status: 'ERROR',
-        error: 'public_key storage error - database column may be too short' 
+        error: 'wallet_public_key storage error - database column may be too short' 
       });
     }
 
@@ -476,9 +506,15 @@ router.post('/bet', async (req, res) => {
       datas: game.datas
     };
 
+    await recordMineMove(game.id, tileIndex, isBomb);
+
+    await recordMineMove(game.id, tileIndex, isBomb);
+
+    await recordMineMove(game.id, point, isBomb);
+
     if (isBomb) {
       // Game over - hit a bomb
-      updateData.status = 'END';
+      updateData.status = 'ENDED';
       await MineGame.findByIdAndUpdate(game.id, updateData);
 
       res.json({
@@ -493,7 +529,7 @@ router.post('/bet', async (req, res) => {
 
       if (allSafeMined) {
         // Game won - all safe slots mined
-        updateData.status = 'END';
+        updateData.status = 'ENDED';
         await MineGame.findByIdAndUpdate(game.id, updateData);
 
         res.json({
@@ -609,7 +645,7 @@ router.post('/pick', async (req, res) => {
 
     if (isBomb) {
       // Game over - hit a bomb
-      updateData.status = 'END';
+      updateData.status = 'ENDED';
       await MineGame.findByIdAndUpdate(game.id, updateData);
 
       res.json({
@@ -627,7 +663,7 @@ router.post('/pick', async (req, res) => {
 
       if (allSafeMined) {
         // Game won - all safe slots mined
-        updateData.status = 'END';
+        updateData.status = 'ENDED';
         await MineGame.findByIdAndUpdate(game.id, updateData);
 
         res.json({
@@ -749,7 +785,7 @@ router.post('/reveal', async (req, res) => {
 
     if (isBomb) {
       // Game over - hit a bomb
-      updateData.status = 'END';
+      updateData.status = 'ENDED';
       await MineGame.findByIdAndUpdate(game.id, updateData);
 
       res.json({
@@ -767,7 +803,7 @@ router.post('/reveal', async (req, res) => {
 
       if (allSafeMined) {
         // Game won - all safe slots mined
-        updateData.status = 'END';
+        updateData.status = 'ENDED';
         await MineGame.findByIdAndUpdate(game.id, updateData);
 
         res.json({
@@ -838,14 +874,14 @@ router.post('/cashout', async (req, res) => {
       return res.status(404).json({ status: 'ERROR', error: 'Game not found' });
     }
 
-    // ✅ IMPORTANT: owner field from MySQL may be public_key not publicKey
-    const owner = normalizeQubicPublicId(game.publicKey || game.public_key || '');
+    // ✅ IMPORTANT: owner field from MySQL is wallet_public_key -> mapped to publicKey
+    const owner = normalizeQubicPublicId(game.publicKey || '');
     if (!isValidQubicPublicId(owner)) {
-      console.error("❌ Game owner public key invalid:", { publicKey: game.publicKey, public_key: game.public_key });
+      console.error("❌ Game owner public key invalid:", { publicKey: game.publicKey });
       return res.status(500).json({
           status: 'ERROR', 
         error: 'Game owner public key is missing/invalid in DB',
-        debug: { publicKey: game.publicKey, public_key: game.public_key }
+        debug: { publicKey: game.publicKey }
         });
       }
       
@@ -896,11 +932,10 @@ router.post('/cashout', async (req, res) => {
     }
 
     // 1) End game in DB first (prevents double cashout)
-    console.log("💾 Updating game status to END");
+    console.log("💾 Updating game status to ENDED");
     await MineGame.findByIdAndUpdate(game.id, {
-      status: 'END',
+      status: 'ENDED',
       payoutAmount: payout.payoutAmount,
-      multiplier: payout.multiplier,
       revealedGems,
     });
 
@@ -927,7 +962,7 @@ router.post('/cashout', async (req, res) => {
     // 3) Store payout txId (optional but recommended)
     await MineGame.findByIdAndUpdate(game.id, { 
       payoutTxId: payoutTx.txId,
-      payoutStatus: 'PAID',
+      payoutStatus: 'SENT',
       payoutError: null
     });
 
@@ -1158,7 +1193,7 @@ router.post('/claim', async (req, res) => {
 
     // Mark as paid
     await MineGame.findByIdAndUpdate(game.id, {
-      payoutStatus: 'PAID',
+      payoutStatus: 'SENT',
       payoutTxId: payoutTx.txId,
       payoutError: null,
     });

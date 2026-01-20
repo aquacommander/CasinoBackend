@@ -53,6 +53,52 @@ function cardKey(c) {
   return `${c.rank}:${c.suit}`;
 }
 
+function cardToIndex(card) {
+  const suitIndex = SUITS.indexOf(card.suit);
+  const rankIndex = RANKS.indexOf(card.rank);
+  if (suitIndex === -1 || rankIndex === -1) return 0;
+  return suitIndex * 13 + rankIndex;
+}
+
+function indexToCard(index) {
+  const idx = Number(index);
+  const suitIndex = Math.floor(idx / 13);
+  const rankIndex = idx % 13;
+  return {
+    rank: RANKS[rankIndex],
+    suit: SUITS[suitIndex],
+  };
+}
+
+function packHand(hand) {
+  return Buffer.from(hand.map(cardToIndex));
+}
+
+function unpackHand(value) {
+  if (!value) return null;
+  const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  return Array.from(buf.slice(0, 5)).map(indexToCard);
+}
+
+function toHoldMask(holdIndexes) {
+  let mask = 0;
+  for (const i of holdIndexes || []) {
+    if (Number.isInteger(i) && i >= 0 && i <= 4) {
+      mask |= 1 << i;
+    }
+  }
+  return mask >>> 0;
+}
+
+function fromHoldMask(mask) {
+  const result = [];
+  const m = Number(mask) >>> 0;
+  for (let i = 0; i < 5; i += 1) {
+    if (((m >>> i) & 1) === 1) result.push(i);
+  }
+  return result;
+}
+
 function removeCards(deck, cardsToRemove) {
   const set = new Set(cardsToRemove.map(cardKey));
   return deck.filter((c) => !set.has(cardKey(c)));
@@ -155,9 +201,9 @@ router.post("/init", async (req, res) => {
 
     // Mines-style: clear expired LIVE games
     await query(
-      `UPDATE video_poker_games
-         SET status='END'
-       WHERE public_key=? AND status='LIVE' AND expires_at IS NOT NULL AND expires_at < NOW()`,
+      `UPDATE video_poker_sessions
+         SET status='EXPIRED'
+       WHERE wallet_public_key=? AND status='LIVE' AND expires_at IS NOT NULL AND expires_at < NOW()`,
       [pk]
     );
 
@@ -171,10 +217,10 @@ router.post("/init", async (req, res) => {
     const hand = deck.slice(0, 5);
 
     const insertRes = await query(
-      `INSERT INTO video_poker_games
-        (public_key, status, expires_at, public_seed, private_seed, private_seed_hash, hand, bet_amount, bet_tx_id)
+      `INSERT INTO video_poker_sessions
+        (wallet_public_key, status, expires_at, public_seed, private_seed, private_seed_hash, initial_hand, bet_amount, bet_tx_id)
        VALUES (?, 'LIVE', DATE_ADD(NOW(), INTERVAL 5 MINUTE), ?, ?, ?, ?, ?, ?)`,
-      [pk, publicSeed, privateSeed, privateSeedHash, JSON.stringify(hand), bet, txId]
+      [pk, publicSeed, privateSeed, privateSeedHash, packHand(hand), bet, txId]
     );
 
     console.log("✅ /init insertRes:", insertRes);
@@ -188,7 +234,7 @@ router.post("/init", async (req, res) => {
 
     // Verify the insert actually happened
     const verify = await query(
-      `SELECT id, public_key, status, expires_at FROM video_poker_games WHERE id=?`,
+      `SELECT id, wallet_public_key, status, expires_at FROM video_poker_sessions WHERE id=?`,
       [gameId]
     );
     console.log("✅ /init verify row:", verify);
@@ -234,8 +280,8 @@ router.post("/draw", async (req, res) => {
     const holds = assertHoldIndexes(holdIndexes || []);
 
     const rows = await query(
-      `SELECT * FROM video_poker_games
-       WHERE id=? AND public_key=? AND status='LIVE'
+      `SELECT * FROM video_poker_sessions
+       WHERE id=? AND wallet_public_key=? AND status='LIVE'
        LIMIT 1`,
       [Number(gameId), pk]
     );
@@ -250,14 +296,16 @@ router.post("/draw", async (req, res) => {
 
     // Check if expired
     if (game.expires_at && new Date(game.expires_at).getTime() < Date.now()) {
-      await query(`UPDATE video_poker_games SET status='END' WHERE id=?`, [game.id]);
+      await query(`UPDATE video_poker_sessions SET status='EXPIRED' WHERE id=?`, [game.id]);
       return res.status(400).json({ error: "Game expired. Please deal again." });
     }
 
     // Idempotent safety: if somehow already ended
     if (game.result) {
+      const initialHand = unpackHand(game.initial_hand);
+      const finalHand = game.final_hand ? unpackHand(game.final_hand) : initialHand;
       return res.json({
-        hand: JSON.parse(game.hand),
+        hand: finalHand,
         result: game.result,
         multiplier: game.multiplier || 0,
         payoutAmount: game.payout_amount || 0,
@@ -266,13 +314,14 @@ router.post("/draw", async (req, res) => {
         publicSeed: game.public_seed,
         privateSeedHash: game.private_seed_hash,
         privateSeed: game.private_seed,
+        holdIndexes: game.hold_mask !== null ? fromHoldMask(game.hold_mask) : null,
       });
     }
 
     const publicSeed = game.public_seed;
     const privateSeed = game.private_seed;
 
-    const currentHand = JSON.parse(game.hand);
+    const currentHand = unpackHand(game.initial_hand);
 
     // ✅ Fairness: shuffle with public + private for draw
     const seedDraw = `${publicSeed}:${privateSeed}:draw`;
@@ -306,10 +355,10 @@ router.post("/draw", async (req, res) => {
     }
 
     await query(
-      `UPDATE video_poker_games
-         SET status='END',
-             hand=?,
-             hold_indexes=?,
+      `UPDATE video_poker_sessions
+         SET status='ENDED',
+             final_hand=?,
+             hold_mask=?,
              result=?,
              multiplier=?,
              payout_amount=?,
@@ -317,8 +366,8 @@ router.post("/draw", async (req, res) => {
              payout_tx_id=?
        WHERE id=?`,
       [
-        JSON.stringify(finalHand),
-        JSON.stringify(holds),
+        packHand(finalHand),
+        toHoldMask(holds),
         result,
         multiplier,
         payoutAmount,
@@ -376,8 +425,8 @@ router.post("/fetchgame", async (req, res) => {
     }
 
     const rows = await query(
-      `SELECT * FROM video_poker_games
-        WHERE public_key=? AND status='LIVE'
+      `SELECT * FROM video_poker_sessions
+        WHERE wallet_public_key=? AND status='LIVE'
         ORDER BY id DESC
         LIMIT 1`,
       [pk]
@@ -389,14 +438,14 @@ router.post("/fetchgame", async (req, res) => {
       // Check if expired
       if (game.expires_at && new Date(game.expires_at).getTime() < Date.now()) {
         // Mark as expired
-        await query(`UPDATE video_poker_games SET status='END' WHERE id=?`, [game.id]);
+        await query(`UPDATE video_poker_sessions SET status='EXPIRED' WHERE id=?`, [game.id]);
         return res.json({ hasGame: false, reason: "expired" });
       }
       
-      if (game.hand) {
+      if (game.initial_hand) {
         return res.json({
           hasGame: true,
-          hand: JSON.parse(game.hand),
+          hand: unpackHand(game.initial_hand),
           publicSeed: game.public_seed,
           privateSeedHash: game.private_seed_hash,
         });

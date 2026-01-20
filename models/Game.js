@@ -1,4 +1,46 @@
 const { query } = require('../database/connection');
+const crypto = require('crypto');
+
+const MINE_CELL_COUNT = 25;
+
+function sha256Buffer(value) {
+  return crypto.createHash('sha256').update(String(value)).digest();
+}
+
+function maskHas(mask, index) {
+  return ((mask >>> index) & 1) === 1;
+}
+
+function buildMasksFromDatas(datas) {
+  let minesMask = 0;
+  let revealedMask = 0;
+  const list = Array.isArray(datas) ? datas : [];
+  for (const item of list) {
+    const idx = Number(item?.point);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= MINE_CELL_COUNT) continue;
+    if (item?.mine === 'BOMB') {
+      minesMask |= 1 << idx;
+    }
+    if (item?.mined) {
+      revealedMask |= 1 << idx;
+    }
+  }
+  return { minesMask: minesMask >>> 0, revealedMask: revealedMask >>> 0 };
+}
+
+function buildDatasFromMasks(minesMask, revealedMask) {
+  const datas = [];
+  const mines = Number(minesMask) >>> 0;
+  const revealed = Number(revealedMask) >>> 0;
+  for (let i = 0; i < MINE_CELL_COUNT; i += 1) {
+    datas.push({
+      point: i,
+      mine: maskHas(mines, i) ? 'BOMB' : 'GEM',
+      mined: maskHas(revealed, i),
+    });
+  }
+  return datas;
+}
 
 /**
  * Safely parse JSON columns that may come back as:
@@ -44,7 +86,7 @@ function safeJson(value, fallback) {
  */
 const CrashGame = {
   async findOne(filters) {
-    let sql = 'SELECT * FROM crash_games WHERE 1=1';
+    let sql = 'SELECT * FROM crash_rounds WHERE 1=1';
     const params = [];
 
     if (filters._id) {
@@ -75,9 +117,9 @@ const CrashGame = {
       crashPoint: parseFloat(game.crash_point),
       publicSeed: game.public_seed,
       privateSeed: game.private_seed,
-      privateHash: game.private_hash,
-      players: safeJson(game.players, []),
-      history: safeJson(game.history, []),
+      privateHash: game.private_seed_hash,
+      players: [],
+      history: [],
       createdAt: game.created_at,
       startedAt: game.started_at,
       endedAt: game.ended_at,
@@ -88,25 +130,22 @@ const CrashGame = {
   },
 
   async create(data) {
-    const sql = `INSERT INTO crash_games 
-      (id, status, crash_point, public_seed, private_seed, private_hash, players, history, started_at, ended_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const sql = `INSERT INTO crash_rounds 
+      (status, crash_point, public_seed, private_seed, private_seed_hash, started_at, ended_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`;
 
     const params = [
-      data._id,
       data.status || 1,
       data.crashPoint || 0,
       data.publicSeed || null,
       data.privateSeed || null,
       data.privateHash || null,
-      JSON.stringify(data.players || []),
-      JSON.stringify(data.history || []),
       data.startedAt || null,
       data.endedAt || null,
     ];
 
-    await query(sql, params);
-    return await CrashGame.findOne({ _id: data._id });
+    const result = await query(sql, params);
+    return await CrashGame.findOne({ _id: result.insertId });
   },
 
   async findByIdAndUpdate(id, updates) {
@@ -121,14 +160,6 @@ const CrashGame = {
       setParts.push('crash_point = ?');
       params.push(updates.crashPoint);
     }
-    if (updates.players !== undefined) {
-      setParts.push('players = ?');
-      params.push(JSON.stringify(updates.players));
-    }
-    if (updates.history !== undefined) {
-      setParts.push('history = ?');
-      params.push(JSON.stringify(updates.history));
-    }
     if (updates.startedAt !== undefined) {
       setParts.push('started_at = ?');
       params.push(updates.startedAt);
@@ -141,7 +172,7 @@ const CrashGame = {
     if (setParts.length === 0) return await CrashGame.findOne({ _id: id });
 
     params.push(id);
-    const sql = `UPDATE crash_games SET ${setParts.join(', ')} WHERE id = ?`;
+    const sql = `UPDATE crash_rounds SET ${setParts.join(', ')} WHERE id = ?`;
     await query(sql, params);
     return await CrashGame.findOne({ _id: id });
   },
@@ -152,8 +183,13 @@ const CrashGame = {
  */
 const SlideGame = {
   async findOne(filters) {
-    let sql = 'SELECT * FROM slide_games WHERE 1=1';
+    let sql = 'SELECT * FROM slide_rounds WHERE 1=1';
     const params = [];
+
+    if (filters._id) {
+      sql += ' AND id = ?';
+      params.push(filters._id);
+    }
 
     if (filters.status) {
       if (Array.isArray(filters.status.$in)) {
@@ -176,10 +212,10 @@ const SlideGame = {
       _id: game.id,
       status: game.status,
       crashPoint: parseFloat(game.crash_point),
-      numbers: safeJson(game.numbers, []),
+      numbers: [],
       publicSeed: game.public_seed,
-      privateHash: game.private_hash,
-      players: safeJson(game.players, []),
+      privateHash: game.private_seed_hash,
+      players: [],
       createdAt: game.created_at,
       save: async function () {
         return await SlideGame.findByIdAndUpdate(this._id, this);
@@ -188,22 +224,25 @@ const SlideGame = {
   },
 
   async create(data) {
-    const sql = `INSERT INTO slide_games 
-      (id, status, crash_point, numbers, public_seed, private_hash, players)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`;
+    const sql = `INSERT INTO slide_rounds 
+      (status, crash_point, public_seed, private_seed_hash, private_seed, numbers_digest)
+      VALUES (?, ?, ?, ?, ?, ?)`;
+
+    const numbersDigest = data.numbers
+      ? sha256Buffer(JSON.stringify(data.numbers))
+      : null;
 
     const params = [
-      data._id,
       data.status || 0,
       data.crashPoint || 0,
-      JSON.stringify(data.numbers || []),
       data.publicSeed || null,
       data.privateHash || null,
-      JSON.stringify(data.players || []),
+      data.privateSeed || null,
+      numbersDigest,
     ];
 
-    await query(sql, params);
-    return await SlideGame.findOne({ _id: data._id });
+    const result = await query(sql, params);
+    return await SlideGame.findOne({ _id: result.insertId });
   },
 
   async findByIdAndUpdate(id, updates) {
@@ -214,13 +253,13 @@ const SlideGame = {
       setParts.push('status = ?');
       params.push(updates.status);
     }
-    if (updates.players !== undefined) {
-      setParts.push('players = ?');
-      params.push(JSON.stringify(updates.players));
+    if (updates.privateSeed !== undefined) {
+      setParts.push('private_seed = ?');
+      params.push(updates.privateSeed);
     }
     if (updates.numbers !== undefined) {
-      setParts.push('numbers = ?');
-      params.push(JSON.stringify(updates.numbers));
+      setParts.push('numbers_digest = ?');
+      params.push(sha256Buffer(JSON.stringify(updates.numbers)));
     }
     if (updates.crashPoint !== undefined) {
       setParts.push('crash_point = ?');
@@ -230,7 +269,7 @@ const SlideGame = {
     if (setParts.length === 0) return await SlideGame.findOne({ _id: id });
 
     params.push(id);
-    const sql = `UPDATE slide_games SET ${setParts.join(', ')} WHERE id = ?`;
+    const sql = `UPDATE slide_rounds SET ${setParts.join(', ')} WHERE id = ?`;
     await query(sql, params);
     return await SlideGame.findOne({ _id: id });
   },
@@ -241,7 +280,7 @@ const SlideGame = {
       selectFields = filters.select;
     }
 
-    let sql = `SELECT ${selectFields} FROM slide_games WHERE 1=1`;
+    let sql = `SELECT ${selectFields} FROM slide_rounds WHERE 1=1`;
     const params = [];
 
     if (filters.status !== undefined) {
@@ -272,7 +311,7 @@ const SlideGame = {
  */
 const MineGame = {
   async findOne(filters) {
-    let sql = 'SELECT * FROM mine_games WHERE 1=1';
+    let sql = 'SELECT * FROM mine_sessions WHERE 1=1';
     const params = [];
 
     if (filters.id) {
@@ -281,13 +320,18 @@ const MineGame = {
     }
 
     if (filters.publicKey) {
-      sql += ' AND public_key = ?';
+      sql += ' AND wallet_public_key = ?';
       params.push(filters.publicKey);
     }
 
     if (filters.status) {
       sql += ' AND status = ?';
       params.push(filters.status);
+    }
+
+    if (filters.payoutStatus) {
+      sql += ' AND payout_status = ?';
+      params.push(filters.payoutStatus);
     }
 
     // Handle MongoDB-style $gt/$lt operators
@@ -310,23 +354,27 @@ const MineGame = {
     if (results.length === 0) return null;
 
     const game = results[0];
+    const minesMask = Number(game.mines_mask) >>> 0;
+    const revealedMask = Number(game.revealed_mask) >>> 0;
     return {
       id: game.id,
-      publicKey: game.public_key,
+      publicKey: game.wallet_public_key,
       status: game.status,
-      mines: game.mines,
-      amount: game.amount,
-      datas: safeJson(game.datas, []),
-      txId: game.tx_id || null,
+      mines: game.mines_count,
+      amount: game.bet_amount,
+      datas: buildDatasFromMasks(minesMask, revealedMask),
+      txId: game.bet_tx_id || null,
+      publicSeed: game.public_seed || null,
+      privateSeedHash: game.private_seed_hash || null,
+      privateSeed: game.private_seed || null,
+      minesMask,
+      revealedMask,
       createdAt: game.created_at,
       expiresAt: game.expires_at,
       // Payout fields
       payoutAmount: game.payout_amount || null,
       payoutTxId: game.payout_tx_id || null,
       payoutStatus: game.payout_status || 'NONE',
-      multiplier: game.multiplier ? parseFloat(game.multiplier) : null,
-      revealedGems: game.revealed_gems || null,
-      houseEdge: game.house_edge ? parseFloat(game.house_edge) : null,
       payoutError: game.payout_error || null,
       save: async function () {
         return await MineGame.findByIdAndUpdate(this.id, this);
@@ -338,10 +386,13 @@ const MineGame = {
     // Convert all values to primitives explicitly
     const publicKey = String(data.publicKey ?? '');
     const status = String(data.status ?? 'READY');
-    const mines = Number.parseInt(String(data.mines ?? '0'), 10);
+    const minesCount = Number.parseInt(String(data.mines ?? '0'), 10);
     const amount = Number.parseInt(String(data.amount ?? '0'), 10);
-    const datasJson = JSON.stringify(data.datas || []);
     const txId = data.txId ? String(data.txId) : null;
+    const { minesMask, revealedMask } = buildMasksFromDatas(data.datas || []);
+    const publicSeed = data.publicSeed || null;
+    const privateSeedHash = data.privateSeedHash || null;
+    const privateSeed = data.privateSeed || null;
 
     // Let mysql2 handle Date objects directly
     const expiresAt =
@@ -355,18 +406,30 @@ const MineGame = {
     if (!publicKey || publicKey.trim() === '') {
       throw new Error('publicKey is required');
     }
-    if (!Number.isInteger(mines) || mines <= 0) {
+    if (!Number.isInteger(minesCount) || minesCount <= 0) {
       throw new Error('mines must be a positive integer');
     }
     if (!Number.isInteger(amount) || amount <= 0) {
       throw new Error('amount must be a positive integer');
     }
 
-    const sql = `INSERT INTO mine_games 
-      (public_key, status, mines, amount, datas, tx_id, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`;
+    const sql = `INSERT INTO mine_sessions 
+      (wallet_public_key, status, mines_count, bet_amount, bet_tx_id, public_seed, private_seed_hash, private_seed, mines_mask, revealed_mask, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-    const params = [publicKey, status, mines, amount, datasJson, txId, expiresAt];
+    const params = [
+      publicKey,
+      status,
+      minesCount,
+      amount,
+      txId,
+      publicSeed,
+      privateSeedHash,
+      privateSeed,
+      minesMask,
+      revealedMask,
+      expiresAt,
+    ];
 
     // Validate no undefined or NaN in params
     if (params.some((v) => v === undefined || (typeof v === 'number' && Number.isNaN(v)))) {
@@ -389,21 +452,23 @@ const MineGame = {
       throw new Error('Failed to get insert ID from database');
     }
 
-    const findSql = 'SELECT * FROM mine_games WHERE id = ? LIMIT 1';
+    const findSql = 'SELECT * FROM mine_sessions WHERE id = ? LIMIT 1';
     const findResults = await query(findSql, [insertId]);
     if (findResults.length === 0) {
       throw new Error('Failed to retrieve created game');
     }
 
     const game = findResults[0];
+    const storedMinesMask = Number(game.mines_mask) >>> 0;
+    const storedRevealedMask = Number(game.revealed_mask) >>> 0;
     return {
       id: game.id,
-      publicKey: game.public_key,
+      publicKey: game.wallet_public_key,
       status: game.status,
-      mines: game.mines,
-      amount: game.amount,
-      datas: safeJson(game.datas, []),
-      txId: game.tx_id || null,
+      mines: game.mines_count,
+      amount: game.bet_amount,
+      datas: buildDatasFromMasks(storedMinesMask, storedRevealedMask),
+      txId: game.bet_tx_id || null,
       createdAt: game.created_at,
       expiresAt: game.expires_at,
       save: async function () {
@@ -421,8 +486,17 @@ const MineGame = {
       params.push(updates.status);
     }
     if (updates.datas !== undefined) {
-      setParts.push('datas = ?');
-      params.push(JSON.stringify(updates.datas));
+      const { revealedMask } = buildMasksFromDatas(updates.datas);
+      setParts.push('revealed_mask = ?');
+      params.push(revealedMask);
+    }
+    if (updates.revealedMask !== undefined) {
+      setParts.push('revealed_mask = ?');
+      params.push(Number(updates.revealedMask) >>> 0);
+    }
+    if (updates.expiresAt !== undefined) {
+      setParts.push('expires_at = ?');
+      params.push(updates.expiresAt);
     }
 
     // Payout fields
@@ -438,18 +512,6 @@ const MineGame = {
       setParts.push('payout_status = ?');
       params.push(String(updates.payoutStatus));
     }
-    if (updates.multiplier !== undefined) {
-      setParts.push('multiplier = ?');
-      params.push(updates.multiplier ? Number(updates.multiplier) : null);
-    }
-    if (updates.revealedGems !== undefined) {
-      setParts.push('revealed_gems = ?');
-      params.push(updates.revealedGems ? Number(updates.revealedGems) : null);
-    }
-    if (updates.houseEdge !== undefined) {
-      setParts.push('house_edge = ?');
-      params.push(updates.houseEdge ? Number(updates.houseEdge) : null);
-    }
     if (updates.payoutError !== undefined) {
       setParts.push('payout_error = ?');
       params.push(updates.payoutError ? String(updates.payoutError) : null);
@@ -458,15 +520,16 @@ const MineGame = {
     if (setParts.length === 0) return await MineGame.findOne({ id });
 
     params.push(id);
-    const sql = `UPDATE mine_games SET ${setParts.join(', ')} WHERE id = ?`;
+    const sql = `UPDATE mine_sessions SET ${setParts.join(', ')} WHERE id = ?`;
     await query(sql, params);
     return await MineGame.findOne({ id });
   },
 
   async deleteExpiredLiveGames(publicKey) {
     const sql = `
-      DELETE FROM mine_games
-      WHERE public_key = ?
+      UPDATE mine_sessions
+      SET status = 'EXPIRED'
+      WHERE wallet_public_key = ?
         AND status = 'LIVE'
         AND expires_at IS NOT NULL
         AND expires_at < NOW()
@@ -475,11 +538,11 @@ const MineGame = {
   },
 
   async deleteMany(filters) {
-    let sql = 'DELETE FROM mine_games WHERE 1=1';
+    let sql = 'DELETE FROM mine_sessions WHERE 1=1';
     const params = [];
 
     if (filters.publicKey) {
-      sql += ' AND public_key = ?';
+      sql += ' AND wallet_public_key = ?';
       params.push(filters.publicKey);
     }
 
@@ -502,11 +565,11 @@ const MineGame = {
  */
 const VideoPokerGame = {
   async findOne(filters) {
-    let sql = 'SELECT * FROM video_poker_games WHERE 1=1';
+    let sql = 'SELECT * FROM video_poker_sessions WHERE 1=1';
     const params = [];
 
     if (filters.publicKey) {
-      sql += ' AND public_key = ?';
+      sql += ' AND wallet_public_key = ?';
       params.push(filters.publicKey);
     }
 
@@ -518,15 +581,16 @@ const VideoPokerGame = {
     const game = results[0];
     return {
       id: game.id,
-      publicKey: game.public_key,
+      publicKey: game.wallet_public_key,
       publicSeed: game.public_seed,
       privateSeed: game.private_seed,
       privateSeedHash: game.private_seed_hash,
-      hand: safeJson(game.hand, []),
-      holdIndexes: safeJson(game.hold_indexes, null),
+      hand: game.initial_hand ? Array.from(game.initial_hand) : [],
+      holdMask: game.hold_mask ?? null,
+      finalHand: game.final_hand ? Array.from(game.final_hand) : null,
       betAmount: game.bet_amount,
       result: game.result,
-      payout: game.payout,
+      payout: game.payout_amount,
       createdAt: game.created_at,
       save: async function () {
         return await VideoPokerGame.findByIdAndUpdate(this.id, this);
@@ -535,19 +599,28 @@ const VideoPokerGame = {
   },
 
   async create(data) {
-    const sql = `INSERT INTO video_poker_games 
-      (public_key, public_seed, private_seed, private_seed_hash, hand, bet_amount, result, payout)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+    const sql = `INSERT INTO video_poker_sessions 
+      (wallet_public_key, public_seed, private_seed, private_seed_hash, initial_hand, bet_amount, result, payout_amount, bet_tx_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+    const initialHand =
+      data.hand instanceof Buffer
+        ? data.hand
+        : Array.isArray(data.hand)
+        ? Buffer.from(data.hand.map((v) => Number(v)))
+        : null;
 
     const params = [
       data.publicKey,
       data.publicSeed || null,
       data.privateSeed || null,
       data.privateSeedHash || null,
-      JSON.stringify(data.hand || []),
+      initialHand,
       data.betAmount || 0,
       data.result || '',
       data.payout || 0,
+      data.betTxId || null,
+      data.status || 'LIVE',
     ];
 
     const result = await query(sql, params);
@@ -559,22 +632,32 @@ const VideoPokerGame = {
     const params = [];
 
     if (updates.hand !== undefined) {
-      setParts.push('hand = ?');
-      params.push(JSON.stringify(updates.hand));
+      const finalHand =
+        updates.hand instanceof Buffer
+          ? updates.hand
+          : Array.isArray(updates.hand)
+          ? Buffer.from(updates.hand.map((v) => Number(v)))
+          : null;
+      setParts.push('final_hand = ?');
+      params.push(finalHand);
+    }
+    if (updates.holdMask !== undefined) {
+      setParts.push('hold_mask = ?');
+      params.push(updates.holdMask);
     }
     if (updates.result !== undefined) {
       setParts.push('result = ?');
       params.push(updates.result);
     }
     if (updates.payout !== undefined) {
-      setParts.push('payout = ?');
+      setParts.push('payout_amount = ?');
       params.push(updates.payout);
     }
 
     if (setParts.length === 0) return await VideoPokerGame.findOne({ id });
 
     params.push(id);
-    const sql = `UPDATE video_poker_games SET ${setParts.join(', ')} WHERE id = ?`;
+    const sql = `UPDATE video_poker_sessions SET ${setParts.join(', ')} WHERE id = ?`;
     await query(sql, params);
     return await VideoPokerGame.findOne({ id });
   },

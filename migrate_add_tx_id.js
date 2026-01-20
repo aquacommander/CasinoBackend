@@ -1,5 +1,5 @@
 /**
- * Migration script to add tx_id column to mine_games table
+ * Migration script to add bet_tx_id column to mine_sessions table
  * Run: node migrate_add_tx_id.js
  */
 
@@ -11,7 +11,7 @@ loadEnv();
 async function migrate() {
   let connection = null;
   try {
-    console.log('🔄 Starting migration: Add tx_id column to mine_games...');
+    console.log('🔄 Starting migration: Add bet_tx_id column to mine_sessions...');
     
     // Connect to MySQL
     connection = await mysql.createConnection(
@@ -25,8 +25,8 @@ async function migrate() {
       SELECT COLUMN_NAME 
       FROM INFORMATION_SCHEMA.COLUMNS 
       WHERE TABLE_SCHEMA = ? 
-        AND TABLE_NAME = 'mine_games' 
-        AND COLUMN_NAME = 'tx_id'
+        AND TABLE_NAME = 'mine_sessions' 
+        AND COLUMN_NAME = 'bet_tx_id'
     `, [getDbName()]);
 
     if (columns.length > 0) {
@@ -37,20 +37,20 @@ async function migrate() {
 
     // Add tx_id column
     await connection.query(`
-      ALTER TABLE mine_games
-        ADD COLUMN tx_id VARCHAR(128) NULL
+      ALTER TABLE mine_sessions
+        ADD COLUMN bet_tx_id VARCHAR(128) NULL
     `);
-    console.log('✅ Added tx_id column');
+    console.log('✅ Added bet_tx_id column');
 
     // Add index
     await connection.query(`
-      CREATE INDEX idx_tx_id ON mine_games(tx_id)
+      CREATE INDEX idx_bet_tx_id ON mine_sessions(bet_tx_id)
     `);
-    console.log('✅ Added index idx_tx_id');
+    console.log('✅ Added index idx_bet_tx_id');
 
     // Verify
-    const [verify] = await connection.query('SHOW COLUMNS FROM mine_games');
-    console.log('\n📋 Current mine_games columns:');
+    const [verify] = await connection.query('SHOW COLUMNS FROM mine_sessions');
+    console.log('\n📋 Current mine_sessions columns:');
     verify.forEach(col => {
       console.log(`  - ${col.Field} (${col.Type})`);
     });
