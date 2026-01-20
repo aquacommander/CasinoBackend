@@ -8,35 +8,62 @@ require('dotenv').config();
 const app = express();
 const server = http.createServer(app);
 
-// Socket.io setup with CORS
-const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000', 'http://localhost:3002'];
+/**
+ * CORS
+ * - For Railway/Vercel, set ALLOWED_ORIGINS to your Vercel domain(s), comma-separated.
+ *   Example:
+ *   ALLOWED_ORIGINS=https://yourapp.vercel.app,https://your-custom-domain.com
+ */
+const allowedOrigins =
+  process.env.ALLOWED_ORIGINS?.split(',')
+    .map((s) => s.trim())
+    .filter(Boolean) || ['http://localhost:3000', 'http://localhost:3002'];
+
+/**
+ * Socket.io setup with CORS
+ */
 const io = socketIo(server, {
   cors: {
     origin: allowedOrigins,
     methods: ['GET', 'POST'],
-    credentials: true
-  }
+    credentials: true,
+  },
 });
 
-// Middleware
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true
-}));
+/**
+ * Middleware
+ */
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true,
+  })
+);
+
 // IMPORTANT: parse JSON body - must be before routes
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: '1mb' }));
 
 // Request logging middleware (for debugging)
 app.use((req, res, next) => {
-  console.log("REQ:", req.method, req.originalUrl, req.body ? JSON.stringify(req.body).substring(0, 100) : '');
+  try {
+    const bodyPreview =
+      req.body ? JSON.stringify(req.body).substring(0, 100) : '';
+    console.log('REQ:', req.method, req.originalUrl, bodyPreview);
+  } catch {
+    console.log('REQ:', req.method, req.originalUrl, '(body not serializable)');
+  }
   next();
 });
 
-// MySQL connection (initialized on first use)
+/**
+ * MySQL connection (initialized on first use)
+ */
 getPool();
 
-// Import routes
-console.log("Loading routes...");
+/**
+ * Import routes
+ */
+console.log('Loading routes...');
 const walletRoutes = require('./routes/wallet');
 const tokenPriceRoutes = require('./routes/tokenPrice');
 const withdrawRoutes = require('./routes/withdraw');
@@ -44,9 +71,11 @@ const mineRoutes = require('./routes/mine');
 const videoPokerRoutes = require('./routes/videoPoker');
 const txRoutes = require('./routes/tx');
 const usersRoutes = require('./routes/users');
-console.log("✅ All routes loaded");
+console.log('✅ All routes loaded');
 
-// API Routes
+/**
+ * API Routes
+ */
 app.use('/api/wallet', walletRoutes);
 app.use('/api/token-price', tokenPriceRoutes);
 app.use('/api/withdraw', withdrawRoutes);
@@ -56,75 +85,84 @@ app.use('/api/tx', txRoutes);
 app.use('/api/users', usersRoutes);
 
 // Log registered routes on startup
-console.log("📋 Registered API routes:");
-console.log("  - GET  /health");
-console.log("  - POST /api/mine/status");
-console.log("  - POST /api/mine/create");
-console.log("  - POST /api/mine/pick");
-console.log("  - POST /api/mine/reveal");
-console.log("  - POST /api/mine/cashout");
-console.log("  - POST /api/mine/claim");
-console.log("  - GET  /api/mine/test");
+console.log('📋 Registered API routes:');
+console.log('  - GET  /health');
+console.log('  - POST /api/mine/status');
+console.log('  - POST /api/mine/create');
+console.log('  - POST /api/mine/pick');
+console.log('  - POST /api/mine/reveal');
+console.log('  - POST /api/mine/cashout');
+console.log('  - POST /api/mine/claim');
+console.log('  - GET  /api/mine/test');
 
-// Health check
+/**
+ * Health check
+ */
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// 404 handler - must be after all routes, before error handler
+/**
+ * 404 handler - must be after all routes, before error handler
+ */
 app.use((req, res) => {
-  console.log("404:", req.method, req.originalUrl);
-  res.status(404).json({ 
-    error: "Not Found", 
+  console.log('404:', req.method, req.originalUrl);
+  res.status(404).json({
+    error: 'Not Found',
     path: req.originalUrl,
     method: req.method,
-    message: `Route ${req.method} ${req.originalUrl} not found`
+    message: `Route ${req.method} ${req.originalUrl} not found`,
   });
 });
 
-// Global error handler - must be after all routes
+/**
+ * Global error handler - must be after all routes
+ */
 app.use((err, req, res, next) => {
   console.error('API ERROR:', err);
-  console.error('Error stack:', err.stack);
+  if (err?.stack) console.error('Error stack:', err.stack);
   res.status(500).json({
     error: 'Internal Server Error',
     message: err?.message ?? String(err),
   });
 });
 
-// Socket.io namespaces
-const crashNamespace = require('./sockets/crash')(io);
-const slideNamespace = require('./sockets/slide')(io);
+/**
+ * Socket.io namespaces
+ */
+require('./sockets/crash')(io);
+require('./sockets/slide')(io);
 
-// Validate and set PORT (prevent using MySQL port 3306)
-let PORT = parseInt(process.env.PORT || '3001', 10);
-
-// Safety check: if PORT is MySQL port or invalid, use default
-if (PORT === 3306 || PORT < 1024 || PORT > 65535 || isNaN(PORT)) {
-  console.warn(`⚠️  Invalid PORT (${process.env.PORT}), using default 3001`);
-  PORT = 3001;
-}
+/**
+ * ✅ PORT + HOST for Railway
+ * - Railway provides PORT (required)
+ * - Must listen on 0.0.0.0 so public networking can reach your service
+ */
+const PORT = Number(process.env.PORT) || 3001;
+const HOST = '0.0.0.0';
 
 // Start server with error handling
-server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📡 Socket.io server ready`);
-  console.log(`🌐 API available at http://localhost:${PORT}/api`);
-}).on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`❌ Port ${PORT} is already in use.`);
-    console.error(`   Please either:`);
-    console.error(`   1. Stop the process using port ${PORT}`);
-    console.error(`   2. Set PORT to a different value (e.g., PORT=3002 npm run dev)`);
-    console.error(`\n   To find what's using port ${PORT}, run:`);
-    if (process.platform === 'win32') {
-      console.error(`   netstat -ano | findstr :${PORT}`);
+server
+  .listen(PORT, HOST, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📡 Socket.io server ready`);
+
+    // Optional: set PUBLIC_URL in Railway to print nicer logs
+    // PUBLIC_URL=https://casinobackend-production-98d1.up.railway.app
+    const publicUrl = process.env.PUBLIC_URL?.trim();
+    if (publicUrl) {
+      console.log(`🌐 Public URL: ${publicUrl}`);
+      console.log(`❤️  Health: ${publicUrl}/health`);
+      console.log(`🔌 API: ${publicUrl}/api`);
     } else {
-      console.error(`   lsof -i :${PORT} or netstat -tulpn | grep :${PORT}`);
+      console.log(`🌐 API available at http://localhost:${PORT}/api`);
+    }
+  })
+  .on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${PORT} is already in use.`);
+    } else {
+      console.error('❌ Server error:', err);
     }
     process.exit(1);
-  } else {
-    console.error('❌ Server error:', err);
-    process.exit(1);
-  }
-});
+  });
