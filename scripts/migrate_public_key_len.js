@@ -1,10 +1,11 @@
 // backend/scripts/migrate_public_key_len.js
-require("dotenv").config();
-
+const { loadEnv, getDbName } = require("../database/dbConfig");
 const { query } = require("../database/connection");
 
+loadEnv();
+
 async function main() {
-  const dbName = process.env.DB_NAME || "qubic_casino";
+  const dbName = getDbName();
 
   // 1) Check current column length in the actual DB
   const rows = await query(

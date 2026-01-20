@@ -1,7 +1,8 @@
 const mysql = require('mysql2/promise');
-const path = require('path');
+const { loadEnv, getPoolConfig } = require('./dbConfig');
+
 // Load .env from backend directory (not current working directory)
-require('dotenv').config({ path: path.join(__dirname, '../.env') });
+loadEnv();
 
 let pool = null;
 
@@ -10,19 +11,7 @@ let pool = null;
  */
 function getPool() {
   if (!pool) {
-    pool = mysql.createPool({
-      host: process.env.DB_HOST || 'localhost',
-      user: process.env.DB_USER || 'root',
-      password: process.env.DB_PASSWORD || '',
-      database: process.env.DB_NAME || 'qubic_casino',
-      waitForConnections: true,
-      connectionLimit: 10,
-      queueLimit: 0,
-      enableKeepAlive: true,
-      keepAliveInitialDelay: 0,
-      acquireTimeout: 60000, // 60 seconds
-      timeout: 60000 // 60 seconds
-    });
+    pool = mysql.createPool(getPoolConfig());
 
     // Handle pool errors
     pool.on('connection', (connection) => {

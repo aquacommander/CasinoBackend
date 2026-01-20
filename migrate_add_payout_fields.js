@@ -1,6 +1,8 @@
 // Migration script to add payout fields to mine_games table
-require('dotenv').config({ path: require('path').join(__dirname, '.env') });
+const { loadEnv } = require('./database/dbConfig');
 const { getPool } = require('./database/connection');
+
+loadEnv();
 
 async function migrate() {
   const pool = getPool();

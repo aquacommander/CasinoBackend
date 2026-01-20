@@ -4,7 +4,9 @@
  */
 
 const mysql = require('mysql2/promise');
-require('dotenv').config();
+const { loadEnv, getConnectionConfig, getDbName } = require('./database/dbConfig');
+
+loadEnv();
 
 async function migrate() {
   let connection = null;
@@ -12,13 +14,9 @@ async function migrate() {
     console.log('🔄 Starting migration: Add tx_id column to mine_games...');
     
     // Connect to MySQL
-    connection = await mysql.createConnection({
-      host: process.env.DB_HOST || 'localhost',
-      user: process.env.DB_USER || 'root',
-      password: process.env.DB_PASSWORD || '',
-      database: process.env.DB_NAME || 'qubic_casino',
-      multipleStatements: true
-    });
+    connection = await mysql.createConnection(
+      getConnectionConfig({ includeDatabase: true, multipleStatements: true })
+    );
 
     console.log('✅ Connected to MySQL');
 
@@ -29,7 +27,7 @@ async function migrate() {
       WHERE TABLE_SCHEMA = ? 
         AND TABLE_NAME = 'mine_games' 
         AND COLUMN_NAME = 'tx_id'
-    `, [process.env.DB_NAME || 'qubic_casino']);
+    `, [getDbName()]);
 
     if (columns.length > 0) {
       console.log('ℹ️  Column tx_id already exists. Skipping...');

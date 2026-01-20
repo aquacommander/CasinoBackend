@@ -7,16 +7,14 @@
 const mysql = require('mysql2/promise');
 const fs = require('fs');
 const path = require('path');
+const { loadEnv, getDbName, getConnectionConfig } = require('./database/dbConfig');
+
+loadEnv();
 
 // Database configuration (uses same env vars as the app)
-const dbConfig = {
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  multipleStatements: true
-};
+const dbConfig = getConnectionConfig({ includeDatabase: false, multipleStatements: true });
 
-const dbName = process.env.DB_NAME || 'qubic_casino';
+const dbName = getDbName();
 const schemaPath = path.join(__dirname, 'database', 'schema.sql');
 
 async function setupDatabase() {
