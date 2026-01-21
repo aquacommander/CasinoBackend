@@ -19,12 +19,28 @@ const allowedOrigins =
     .map((s) => s.trim())
     .filter(Boolean) || ['http://localhost:3000', 'http://localhost:3002'];
 
+const allowedOriginRegex = process.env.ALLOWED_ORIGIN_REGEX
+  ? new RegExp(process.env.ALLOWED_ORIGIN_REGEX)
+  : null;
+
+const isOriginAllowed = (origin) => {
+  if (!origin) return true; // allow same-origin / server-to-server
+  if (allowedOrigins.includes(origin)) return true;
+  if (allowedOriginRegex && allowedOriginRegex.test(origin)) return true;
+  return false;
+};
+
 /**
  * Socket.io setup with CORS
  */
 const io = socketIo(server, {
   cors: {
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error(`Origin not allowed: ${origin}`));
+    },
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -35,7 +51,12 @@ const io = socketIo(server, {
  */
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error(`Origin not allowed: ${origin}`));
+    },
     credentials: true,
   })
 );
